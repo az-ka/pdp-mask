@@ -2,8 +2,12 @@
 
 Local-first CLI for scanning SQL/CSV snapshots for likely Indonesian PII before data is used in local, staging, demo, CI, or vendor workflows.
 
-Current MVP supports CSV scan reports, plan generation, deterministic CSV masking, and plan/artifact verification.
+Current MVP supports CSV scan reports, plan generation, deterministic CSV masking, plan/artifact verification, and extensible detector rule packs.
 
+Custom rule packs can be loaded using the `--rules` flag during `scan` or `verify`:
+```bash
+go run ./cmd/pdp-mask scan testdata/customers_pii.csv --rules custom_rules.yml
+```
 ## Usage
 
 ```bash

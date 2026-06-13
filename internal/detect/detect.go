@@ -1,10 +1,14 @@
 package detect
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"unicode"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -133,6 +137,132 @@ var (
 	dateRe  = regexp.MustCompile(`^(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}-\d{2}-\d{4})$`)
 )
 
+type Rule struct {
+	Name           string   `yaml:"name"`
+	Category       string   `yaml:"category"`
+	ColumnPatterns []string `yaml:"column_patterns"`
+	ValuePattern   string   `yaml:"value_pattern"`
+	ValueWeight    float64  `yaml:"value_weight"`
+	ColumnWeight   float64  `yaml:"column_weight"`
+}
+
+type Pack struct {
+	Version int    `yaml:"version"`
+	Name    string `yaml:"pack_name"`
+	Rules   []Rule `yaml:"rules"`
+}
+
+var ActiveRules = []Rule{
+	{
+		Name:           "email",
+		Category:       CategoryEmail,
+		ColumnPatterns: []string{"email", "mail", "alamat_email"},
+		ValuePattern:   `^[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$`,
+		ValueWeight:    0.85,
+		ColumnWeight:   0.62,
+	},
+	{
+		Name:           "phone",
+		Category:       CategoryPhoneID,
+		ColumnPatterns: []string{"phone", "telepon", "telp", "mobile", "whatsapp", "wa", "no_hp", "nomor_hp"},
+		ValuePattern:   `^(?:\+62|62|0)8[0-9]{8,12}$`,
+		ValueWeight:    0.80,
+		ColumnWeight:   0.58,
+	},
+	{
+		Name:           "nik",
+		Category:       CategoryNIK,
+		ColumnPatterns: []string{"nik", "ktp", "no_ktp", "nomor_ktp"},
+		ValuePattern:   `^[0-9]{16}$`,
+		ValueWeight:    0.80,
+		ColumnWeight:   0.62,
+	},
+	{
+		Name:           "npwp",
+		Category:       CategoryNPWP,
+		ColumnPatterns: []string{"npwp", "tax_id"},
+		ValuePattern:   `^[0-9]{15,16}$`,
+		ValueWeight:    0.78,
+		ColumnWeight:   0.62,
+	},
+	{
+		Name:           "name",
+		Category:       CategoryName,
+		ColumnPatterns: []string{"nama", "name", "pemilik", "full_name", "first_name", "last_name", "ibu_kandung"},
+		ColumnWeight:   0.58,
+	},
+	{
+		Name:           "address",
+		Category:       CategoryAddress,
+		ColumnPatterns: []string{"alamat", "address", "jalan", "kelurahan", "kecamatan", "kota", "kabupaten", "provinsi", "kodepos", "kode_pos"},
+		ValuePattern:   `jl`,
+		ValueWeight:    0.50,
+		ColumnWeight:   0.58,
+	},
+	{
+		Name:           "date_of_birth",
+		Category:       CategoryDateOfBirth,
+		ColumnPatterns: []string{"tanggal_lahir", "tgl_lahir", "birth_date", "dob"},
+		ValuePattern:   `dob`,
+		ValueWeight:    0.45,
+		ColumnWeight:   0.62,
+	},
+	{
+		Name:           "bank_account",
+		Category:       CategoryBankAccount,
+		ColumnPatterns: []string{"rekening", "no_rekening", "nomor_rekening", "bank_account", "account_number"},
+		ValuePattern:   `rekening`,
+		ValueWeight:    0.50,
+		ColumnWeight:   0.55,
+	},
+}
+
+var regexCache = make(map[string]*regexp.Regexp)
+
+func getCachedRegex(pattern string) (*regexp.Regexp, error) {
+	if re, ok := regexCache[pattern]; ok {
+		return re, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	regexCache[pattern] = re
+	return re, nil
+}
+
+func LoadRules(path string) error {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read rules: %w", err)
+	}
+	var pack Pack
+	if err := yaml.Unmarshal(payload, &pack); err != nil {
+		return fmt.Errorf("parse rules YAML: %w", err)
+	}
+	if pack.Version != 1 {
+		return fmt.Errorf("unsupported rules version %d", pack.Version)
+	}
+	ruleMap := make(map[string]Rule)
+	for _, rule := range ActiveRules {
+		ruleMap[rule.Name] = rule
+	}
+	for _, rule := range pack.Rules {
+		if rule.ValuePattern != "" {
+			if _, err := regexp.Compile(rule.ValuePattern); err != nil {
+				return fmt.Errorf("rule %q has invalid value pattern regex %q: %w", rule.Name, rule.ValuePattern, err)
+			}
+		}
+		ruleMap[rule.Name] = rule
+	}
+	newRules := make([]Rule, 0, len(ruleMap))
+	for _, rule := range ruleMap {
+		newRules = append(newRules, rule)
+	}
+	ActiveRules = newRules
+	return nil
+}
+
 func columnSignals(name string) map[string]signal {
 	tokens := normalizeName(name)
 	joined := strings.Join(tokens, "_")
@@ -145,54 +275,59 @@ func columnSignals(name string) map[string]signal {
 		current.evidence = append(current.evidence, ev)
 		out[category] = current
 	}
-
-	if hasAny(tokens, "email", "mail") || strings.Contains(joined, "alamat_email") {
-		add(CategoryEmail, 0.62, "column_name:email")
-	}
-	if hasAny(tokens, "nik", "ktp") || strings.Contains(joined, "no_ktp") || strings.Contains(joined, "nomor_ktp") {
-		add(CategoryNIK, 0.62, "column_name:nik")
-	}
-	if hasAny(tokens, "npwp") || strings.Contains(joined, "tax_id") {
-		add(CategoryNPWP, 0.62, "column_name:npwp")
-	}
-	if hasAny(tokens, "phone", "telepon", "telp", "mobile", "whatsapp", "wa") || strings.Contains(joined, "no_hp") || strings.Contains(joined, "nomor_hp") {
-		add(CategoryPhoneID, 0.58, "column_name:phone")
-	}
-	if hasAny(tokens, "nama", "name", "pemilik") || strings.Contains(joined, "full_name") || strings.Contains(joined, "first_name") || strings.Contains(joined, "last_name") || strings.Contains(joined, "ibu_kandung") {
-		add(CategoryName, 0.58, "column_name:name")
-	}
-	if hasAny(tokens, "alamat", "address", "jalan", "kelurahan", "kecamatan", "kota", "kabupaten", "provinsi", "kodepos") || strings.Contains(joined, "kode_pos") {
-		add(CategoryAddress, 0.58, "column_name:address")
-	}
-	if strings.Contains(joined, "tanggal_lahir") || strings.Contains(joined, "tgl_lahir") || strings.Contains(joined, "birth_date") || hasAny(tokens, "dob") {
-		add(CategoryDateOfBirth, 0.62, "column_name:date_of_birth")
-	}
-	if strings.Contains(joined, "no_rekening") || strings.Contains(joined, "nomor_rekening") || strings.Contains(joined, "bank_account") || hasAny(tokens, "rekening") {
-		add(CategoryBankAccount, 0.55, "column_name:bank_account")
+	for _, rule := range ActiveRules {
+		if rule.ColumnWeight <= 0 {
+			continue
+		}
+		matched := false
+		for _, pattern := range rule.ColumnPatterns {
+			patternTokens := normalizeName(pattern)
+			patternJoined := strings.Join(patternTokens, "_")
+			if hasAny(tokens, pattern) || strings.Contains(joined, patternJoined) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			add(rule.Category, rule.ColumnWeight, "column_name:"+rule.Name)
+		}
 	}
 	return out
 }
 
 func matchValue(value string) []valueMatch {
 	matches := make([]valueMatch, 0, 4)
-	if emailRe.MatchString(value) {
-		matches = append(matches, valueMatch{CategoryEmail, "value_pattern:email"})
-	}
 	digits := onlyDigits(value)
-	if isIndonesianPhone(value, digits) {
-		matches = append(matches, valueMatch{CategoryPhoneID, "value_pattern:phone_id"})
-	}
-	if isPossibleNIK(digits) {
-		matches = append(matches, valueMatch{CategoryNIK, "value_pattern:nik"})
-	}
-	if isPossibleNPWP(digits) {
-		matches = append(matches, valueMatch{CategoryNPWP, "value_pattern:npwp"})
-	}
-	if dateRe.MatchString(value) {
-		matches = append(matches, valueMatch{CategoryDateOfBirth, "value_pattern:date"})
-	}
-	if looksLikeAddress(value) {
-		matches = append(matches, valueMatch{CategoryAddress, "value_pattern:address_token"})
+	for _, rule := range ActiveRules {
+		if rule.ValuePattern == "" {
+			continue
+		}
+		matched := false
+		switch rule.Name {
+		case "email":
+			matched = emailRe.MatchString(value)
+		case "phone":
+			matched = isIndonesianPhone(value, digits)
+		case "nik":
+			matched = isPossibleNIK(digits)
+		case "npwp":
+			matched = isPossibleNPWP(digits)
+		case "date_of_birth":
+			matched = dateRe.MatchString(value)
+		case "address":
+			matched = looksLikeAddress(value)
+		default:
+			re, err := getCachedRegex(rule.ValuePattern)
+			if err == nil && re != nil {
+				matched = re.MatchString(value)
+			}
+		}
+		if matched {
+			matches = append(matches, valueMatch{
+				category: rule.Category,
+				evidence: "value_pattern:" + rule.Name,
+			})
+		}
 	}
 	return matches
 }
@@ -202,16 +337,14 @@ func valueScore(category string, matches, sampled int) float64 {
 		return 0
 	}
 	ratio := float64(matches) / float64(sampled)
-	weights := map[string]float64{
-		CategoryEmail:       0.85,
-		CategoryPhoneID:     0.80,
-		CategoryNIK:         0.80,
-		CategoryNPWP:        0.78,
-		CategoryDateOfBirth: 0.45,
-		CategoryAddress:     0.50,
-		CategoryBankAccount: 0.50,
+	weight := 0.50
+	for _, rule := range ActiveRules {
+		if rule.Category == category && rule.ValueWeight > 0 {
+			weight = rule.ValueWeight
+			break
+		}
 	}
-	return weights[category] * ratio
+	return weight * ratio
 }
 
 func isIndonesianPhone(raw, digits string) bool {

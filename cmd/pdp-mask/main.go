@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/az-ka/pdp-mask/internal/apply"
+	"github.com/az-ka/pdp-mask/internal/detect"
 	"github.com/az-ka/pdp-mask/internal/plan"
 	"github.com/az-ka/pdp-mask/internal/scan"
 	"github.com/az-ka/pdp-mask/internal/verify"
@@ -87,7 +88,7 @@ func splitArgs(args []string, needsValue func(string) bool) ([]string, []string)
 
 func scanFlagNeedsValue(flagName string) bool {
 	switch flagName {
-	case "--format", "-format", "--json", "-json", "--out", "-out", "--sample-rows", "-sample-rows", "--preset", "-preset":
+	case "--format", "-format", "--json", "-json", "--out", "-out", "--sample-rows", "-sample-rows", "--preset", "-preset", "--rules", "-rules":
 		return true
 	default:
 		return false
@@ -102,9 +103,15 @@ func runScan(args []string) error {
 	outPath := fs.String("out", "", "alias for --json")
 	sampleRows := fs.Int("sample-rows", 500, "maximum non-empty values sampled per column")
 	preset := fs.String("preset", "indonesia", "detector preset")
+	rulesPath := fs.String("rules", "", "path to custom rules YAML pack")
 	flagArgs, inputs := splitScanArgs(args)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if *rulesPath != "" {
+		if err := detect.LoadRules(*rulesPath); err != nil {
+			return err
+		}
 	}
 	if len(inputs) != 1 {
 		return errors.New("scan requires exactly one input file")
@@ -336,9 +343,15 @@ func runVerify(args []string) error {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "masking plan YAML")
 	outPath := fs.String("out", "", "masked CSV output path")
+	rulesPath := fs.String("rules", "", "path to custom rules YAML pack")
 	flagArgs, inputs := splitArgs(args, verifyFlagNeedsValue)
 	if err := fs.Parse(flagArgs); err != nil {
 		return CLIError{Code: 1, Err: err}
+	}
+	if *rulesPath != "" {
+		if err := detect.LoadRules(*rulesPath); err != nil {
+			return CLIError{Code: 1, Err: err}
+		}
 	}
 	if len(inputs) != 1 {
 		return CLIError{Code: 1, Err: errors.New("verify requires exactly one input CSV file")}
@@ -386,7 +399,7 @@ func runVerify(args []string) error {
 
 func verifyFlagNeedsValue(flagName string) bool {
 	switch flagName {
-	case "--config", "-config", "--out", "-out":
+	case "--config", "-config", "--out", "-out", "--rules", "-rules":
 		return true
 	default:
 		return false
