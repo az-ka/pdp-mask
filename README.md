@@ -2,12 +2,13 @@
 
 Local-first CLI for scanning SQL/CSV snapshots for likely Indonesian PII before data is used in local, staging, demo, CI, or vendor workflows.
 
-Phase 1 currently supports CSV scanning only.
+Current MVP supports CSV scan reports and plan generation.
 
 ## Usage
 
 ```bash
 go run ./cmd/pdp-mask scan testdata/customers_pii.csv --json reports/customers.scan.json
+go run ./cmd/pdp-mask plan reports/customers.scan.json --out reports/mask.yml
 ```
 
 Example output:
@@ -27,4 +28,4 @@ Likely PII
 - Indonesian name/address/date-of-birth column heuristics
 - Operational numeric ID false-positive guardrails
 
-Default reports do not include raw sampled values.
+Default reports and generated plans do not include raw sampled values.

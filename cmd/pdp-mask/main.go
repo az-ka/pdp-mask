@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/az-ka/pdp-mask/internal/plan"
 	"github.com/az-ka/pdp-mask/internal/scan"
 )
 
@@ -27,6 +28,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "scan":
 		return runScan(args[1:])
+	case "plan":
+		return runPlan(args[1:])
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)
 		return nil
@@ -37,13 +40,17 @@ func run(args []string) error {
 }
 
 func splitScanArgs(args []string) ([]string, []string) {
+	return splitArgs(args, scanFlagNeedsValue)
+}
+
+func splitArgs(args []string, needsValue func(string) bool) ([]string, []string) {
 	flagArgs := make([]string, 0, len(args))
 	inputs := make([]string, 0, 1)
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flagArgs = append(flagArgs, arg)
-			if !strings.Contains(arg, "=") && scanFlagNeedsValue(arg) && i+1 < len(args) {
+			if !strings.Contains(arg, "=") && needsValue(arg) && i+1 < len(args) {
 				i++
 				flagArgs = append(flagArgs, args[i])
 			}
@@ -106,6 +113,57 @@ func runScan(args []string) error {
 	return nil
 }
 
+func runPlan(args []string) error {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	outPath := fs.String("out", "", "write masking plan YAML")
+	force := fs.Bool("force", false, "overwrite output file if it exists")
+	flagArgs, inputs := splitArgs(args, planFlagNeedsValue)
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(inputs) != 1 {
+		return errors.New("plan requires exactly one scan JSON file")
+	}
+	if *outPath == "" {
+		return errors.New("plan requires --out")
+	}
+	if !*force {
+		if _, err := os.Stat(*outPath); err == nil {
+			return fmt.Errorf("output file already exists: %s", *outPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check output file: %w", err)
+		}
+	}
+	scanPath := inputs[0]
+	payload, err := os.ReadFile(scanPath)
+	if err != nil {
+		return fmt.Errorf("read scan JSON: %w", err)
+	}
+	var report scan.Report
+	if err := json.Unmarshal(payload, &report); err != nil {
+		return fmt.Errorf("parse scan JSON: %w", err)
+	}
+	doc, err := plan.Generate(&report, scanPath, payload)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(*outPath, plan.RenderYAML(doc), 0o644); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	printPlanReport(os.Stdout, scanPath, *outPath, doc)
+	return nil
+}
+
+func planFlagNeedsValue(flagName string) bool {
+	switch flagName {
+	case "--out", "-out":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolveFormat(path, requested string) (string, error) {
 	switch requested {
 	case "csv":
@@ -155,7 +213,18 @@ func writeJSON(path string, report *scan.Report) error {
 	return nil
 }
 
+func printPlanReport(out *os.File, scanPath, outPath string, doc *plan.Document) {
+	fmt.Fprintf(out, "pdp-mask plan %s\n\n", scanPath)
+	fmt.Fprintf(out, "Output   %s\n", outPath)
+	fmt.Fprintf(out, "Inputs   %d\n", len(doc.Inputs))
+	fmt.Fprintf(out, "Findings %d\n", doc.Findings)
+	fmt.Fprintf(out, "Actions  mask=%d review=%d\n", doc.Summary.Mask, doc.Summary.Review)
+	fmt.Fprintln(out, "\nNext step")
+	fmt.Fprintln(out, "  pdp-mask apply <input> --config mask.yml --out <masked-output>")
+}
+
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pdp-mask scan <file.csv> [--json report.json] [--sample-rows 500]")
+	fmt.Fprintln(out, "  pdp-mask plan <scan.json> --out mask.yml")
 }
