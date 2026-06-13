@@ -1,0 +1,4 @@
+id,nama_lengkap,email,no_hp,nik,npwp,alamat,tgl_lahir,status,created_at
+1,Siti Aminah,siti.aminah@example.test,0812-3456-7890,3173054401010001,12.345.678.9-012.000,"Jl. Melati No. 7 RT 01 RW 02, Kota Bandung",1991-01-04,active,2024-01-02T03:04:05Z
+2,Budi Santoso,budi.santoso@example.test,+62 812 1111 2222,3276021502870002,98.765.432.1-091.000,"Jalan Kenanga 12, Kec Sukajadi",1987-02-15,inactive,2024-02-03T04:05:06Z
+3,Dewi Lestari,dewi.lestari@example.test,6281312345678,3374015203900003,01.234.567.8-999.000,"Gang Mawar 3, Kel Cikutra",1990-03-12,pending,2024-03-04T05:06:07Z
