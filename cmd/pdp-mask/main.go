@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/az-ka/pdp-mask/internal/apply"
 	"github.com/az-ka/pdp-mask/internal/plan"
 	"github.com/az-ka/pdp-mask/internal/scan"
 )
@@ -30,6 +31,8 @@ func run(args []string) error {
 		return runScan(args[1:])
 	case "plan":
 		return runPlan(args[1:])
+	case "apply":
+		return runApply(args[1:])
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)
 		return nil
@@ -155,6 +158,82 @@ func runPlan(args []string) error {
 	return nil
 }
 
+func runApply(args []string) error {
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "masking plan YAML")
+	outPath := fs.String("out", "", "masked CSV output path")
+	force := fs.Bool("force", false, "overwrite output file if it exists")
+	saltEnv := fs.String("salt-env", "PDP_MASK_SALT", "environment variable containing masking salt")
+	saltFile := fs.String("salt-file", "", "file containing masking salt")
+	flagArgs, inputs := splitArgs(args, applyFlagNeedsValue)
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(inputs) != 1 {
+		return errors.New("apply requires exactly one input CSV file")
+	}
+	if *configPath == "" {
+		return errors.New("apply requires --config")
+	}
+	if *outPath == "" {
+		return errors.New("apply requires --out")
+	}
+	if !*force {
+		if _, err := os.Stat(*outPath); err == nil {
+			return fmt.Errorf("output file already exists: %s", *outPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check output file: %w", err)
+		}
+	}
+	salt, err := loadSalt(*saltEnv, *saltFile)
+	if err != nil {
+		return err
+	}
+	result, err := apply.ApplyCSV(apply.Options{
+		InputPath:  inputs[0],
+		PlanPath:   *configPath,
+		OutputPath: *outPath,
+		Salt:       salt,
+	})
+	if err != nil {
+		return err
+	}
+	printApplyReport(os.Stdout, inputs[0], *outPath, result)
+	return nil
+}
+
+func applyFlagNeedsValue(flagName string) bool {
+	switch flagName {
+	case "--config", "-config", "--out", "-out", "--salt-env", "-salt-env", "--salt-file", "-salt-file":
+		return true
+	default:
+		return false
+	}
+}
+
+func loadSalt(envName, filePath string) ([]byte, error) {
+	if filePath != "" {
+		payload, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("read salt file: %w", err)
+		}
+		payload = []byte(strings.TrimSpace(string(payload)))
+		if len(payload) < apply.MinSaltLength {
+			return nil, fmt.Errorf("salt must be at least %d bytes", apply.MinSaltLength)
+		}
+		return payload, nil
+	}
+	if envName == "" {
+		return nil, errors.New("salt env name is required")
+	}
+	salt := []byte(os.Getenv(envName))
+	if len(salt) < apply.MinSaltLength {
+		return nil, fmt.Errorf("salt env %s must contain at least %d bytes", envName, apply.MinSaltLength)
+	}
+	return salt, nil
+}
+
 func planFlagNeedsValue(flagName string) bool {
 	switch flagName {
 	case "--out", "-out":
@@ -223,8 +302,17 @@ func printPlanReport(out *os.File, scanPath, outPath string, doc *plan.Document)
 	fmt.Fprintln(out, "  pdp-mask apply <input> --config mask.yml --out <masked-output>")
 }
 
+func printApplyReport(out *os.File, inputPath, outPath string, result apply.Result) {
+	fmt.Fprintf(out, "pdp-mask apply %s\n\n", inputPath)
+	fmt.Fprintf(out, "Output         %s\n", outPath)
+	fmt.Fprintf(out, "Rows           %d\n", result.Rows)
+	fmt.Fprintf(out, "Masked columns %d\n", result.MaskedColumns)
+	fmt.Fprintf(out, "Masked values  %d\n", result.MaskedValues)
+}
+
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pdp-mask scan <file.csv> [--json report.json] [--sample-rows 500]")
 	fmt.Fprintln(out, "  pdp-mask plan <scan.json> --out mask.yml")
+	fmt.Fprintln(out, "  pdp-mask apply <file.csv> --config mask.yml --out safe.csv")
 }

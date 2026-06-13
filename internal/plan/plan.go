@@ -14,34 +14,40 @@ import (
 )
 
 type Source struct {
-	Scan       string
-	ScanSHA256 string
+	Scan       string `yaml:"scan"`
+	ScanSHA256 string `yaml:"scan_sha256"`
 }
 
 type ColumnPlan struct {
-	Input      string
-	Table      string
-	Column     string
-	Action     string
-	Type       string
-	Strategy   string
-	Confidence string
-	Score      float64
-	Sampled    int
-	Matches    int
-	Evidence   []string
+	Input      string   `yaml:"input"`
+	Table      string   `yaml:"table"`
+	Column     string   `yaml:"column"`
+	Action     string   `yaml:"action"`
+	Type       string   `yaml:"type"`
+	Strategy   string   `yaml:"strategy"`
+	Confidence string   `yaml:"confidence"`
+	Score      float64  `yaml:"score"`
+	Sampled    int      `yaml:"sampled"`
+	Matches    int      `yaml:"matches"`
+	Evidence   []string `yaml:"evidence"`
 }
 
 type ActionSummary struct {
-	Mask   int
-	Review int
+	Mask   int `yaml:"mask"`
+	Review int `yaml:"review"`
+}
+
+type Summary struct {
+	Inputs   int           `yaml:"inputs"`
+	Findings int           `yaml:"findings"`
+	Actions  ActionSummary `yaml:"actions"`
 }
 
 type Document struct {
-	Version  int
-	Source   Source
-	Inputs   []scan.Input
-	Columns  []ColumnPlan
+	Version  int          `yaml:"version"`
+	Source   Source       `yaml:"source"`
+	Inputs   []scan.Input `yaml:"inputs"`
+	Columns  []ColumnPlan `yaml:"columns"`
 	Summary  ActionSummary
 	Findings int
 }
