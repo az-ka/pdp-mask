@@ -1,0 +1,71 @@
+name: pdp-mask CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Verify Go format
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "The following files are not formatted correctly:"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Build CLI
+        run: go build -v ./cmd/pdp-mask
+
+      - name: Run unit tests
+        run: go test -v ./...
+
+  verify-fixtures:
+    name: Verify CSV Fixtures
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build pdp-mask
+        run: go build -o pdp-mask ./cmd/pdp-mask
+
+      - name: Scan test fixture
+        run: ./pdp-mask scan testdata/customers_pii.csv --json scan-report.json
+
+      - name: Generate plan (if not present)
+        run: |
+          if [ ! -f mask-ci.yml ]; then
+            ./pdp-mask plan scan-report.json --out mask-ci.yml
+          fi
+
+      - name: Auto-resolve review actions for CI demo
+        run: |
+          sed -i 's/action: "review"/action: "mask"/g' mask-ci.yml
+
+      - name: Apply masking
+        env:
+          PDP_MASK_SALT: "0123456789abcdef"
+        run: ./pdp-mask apply testdata/customers_pii.csv --config mask-ci.yml --out safe-ci.csv
+
+      - name: Verify masked output
+        run: ./pdp-mask verify testdata/customers_pii.csv --config mask-ci.yml --out safe-ci.csv

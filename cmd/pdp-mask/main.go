@@ -12,10 +12,29 @@ import (
 	"github.com/az-ka/pdp-mask/internal/apply"
 	"github.com/az-ka/pdp-mask/internal/plan"
 	"github.com/az-ka/pdp-mask/internal/scan"
+	"github.com/az-ka/pdp-mask/internal/verify"
 )
+
+type CLIError struct {
+	Code int
+	Err  error
+}
+
+func (e CLIError) Error() string {
+	return e.Err.Error()
+}
+
+func (e CLIError) Unwrap() error {
+	return e.Err
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var cliErr CLIError
+		if errors.As(err, &cliErr) {
+			fmt.Fprintf(os.Stderr, "pdp-mask: %v\n", cliErr.Err)
+			os.Exit(cliErr.Code)
+		}
 		fmt.Fprintf(os.Stderr, "pdp-mask: %v\n", err)
 		os.Exit(1)
 	}
@@ -33,6 +52,8 @@ func run(args []string) error {
 		return runPlan(args[1:])
 	case "apply":
 		return runApply(args[1:])
+	case "verify":
+		return runVerify(args[1:])
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)
 		return nil
@@ -310,9 +331,89 @@ func printApplyReport(out *os.File, inputPath, outPath string, result apply.Resu
 	fmt.Fprintf(out, "Masked values  %d\n", result.MaskedValues)
 }
 
+func runVerify(args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "masking plan YAML")
+	outPath := fs.String("out", "", "masked CSV output path")
+	flagArgs, inputs := splitArgs(args, verifyFlagNeedsValue)
+	if err := fs.Parse(flagArgs); err != nil {
+		return CLIError{Code: 1, Err: err}
+	}
+	if len(inputs) != 1 {
+		return CLIError{Code: 1, Err: errors.New("verify requires exactly one input CSV file")}
+	}
+	if *configPath == "" {
+		return CLIError{Code: 1, Err: errors.New("verify requires --config")}
+	}
+	if *outPath == "" {
+		return CLIError{Code: 1, Err: errors.New("verify requires --out")}
+	}
+
+	result, err := verify.Verify(verify.Options{
+		ConfigPath: *configPath,
+		InputPath:  inputs[0],
+		OutputPath: *outPath,
+	})
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "read config") || strings.Contains(errStr, "parse config YAML") || strings.Contains(errStr, "unsupported plan version") {
+			return CLIError{Code: 2, Err: err}
+		}
+		if strings.Contains(errStr, "scan input CSV") || strings.Contains(errStr, "scan safe CSV") || strings.Contains(errStr, "read input headers") || strings.Contains(errStr, "read output headers") || strings.Contains(errStr, "count input rows") || strings.Contains(errStr, "count output rows") || strings.Contains(errStr, "read csv row") {
+			return CLIError{Code: 2, Err: err}
+		}
+		return CLIError{Code: 1, Err: err}
+	}
+
+	printVerifyReport(os.Stdout, result)
+
+	if !result.Passed {
+		code := 3
+		for _, issue := range result.Issues {
+			if strings.Contains(issue, "header count mismatch") ||
+				strings.Contains(issue, "header mismatch") ||
+				strings.Contains(issue, "row count mismatch") ||
+				strings.Contains(issue, "byte-identical") {
+				code = 4
+				break
+			}
+		}
+		return CLIError{Code: code, Err: fmt.Errorf("verification failed (%d checks failed): %s", len(result.Issues), strings.Join(result.Issues, "; "))}
+	}
+	return nil
+}
+
+func verifyFlagNeedsValue(flagName string) bool {
+	switch flagName {
+	case "--config", "-config", "--out", "-out":
+		return true
+	default:
+		return false
+	}
+}
+
+func printVerifyReport(out *os.File, result *verify.VerificationResult) {
+	fmt.Fprintf(out, "Plan policy         %s\n", result.PlanPolicyStatus)
+	fmt.Fprintf(out, "Input coverage      %s\n", result.InputCoverageStatus)
+	fmt.Fprintf(out, "Output leakage      %s\n", result.OutputLeakageStatus)
+	fmt.Fprintf(out, "Artifact shape      %s\n", result.ArtifactShapeStatus)
+	fmt.Fprintf(out, "Strategy validation %s\n", result.StrategyValStatus)
+	fmt.Fprintln(out)
+	if result.Passed {
+		fmt.Fprintln(out, "Result: PASS")
+	} else {
+		fmt.Fprintf(out, "Result: FAIL (%d checks failed)\n", len(result.Issues))
+		for _, issue := range result.Issues {
+			fmt.Fprintf(out, "  - %s\n", issue)
+		}
+	}
+}
+
 func printUsage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  pdp-mask scan <file.csv> [--json report.json] [--sample-rows 500]")
 	fmt.Fprintln(out, "  pdp-mask plan <scan.json> --out mask.yml")
 	fmt.Fprintln(out, "  pdp-mask apply <file.csv> --config mask.yml --out safe.csv")
+	fmt.Fprintln(out, "  pdp-mask verify <file.csv> --config mask.yml --out safe.csv")
 }
