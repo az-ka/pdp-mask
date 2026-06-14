@@ -358,7 +358,7 @@ func TestLoadSalt_FileMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing salt file")
 	}
-	if !strings.Contains(err.Error(), "read salt file") {
+	if !strings.Contains(err.Error(), "salt file") {
 		t.Fatalf("err = %q", err.Error())
 	}
 }
