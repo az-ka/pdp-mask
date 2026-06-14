@@ -641,9 +641,9 @@ func TestRunVerify_Errors(t *testing.T) {
 	mustWriteFile(t, output, cliVerifyCSV)
 
 	cases := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name     string
+		args     []string
+		wantErr  string
 		wantCode int
 	}{
 		{

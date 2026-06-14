@@ -227,8 +227,6 @@ func init() {
 // Helpers (exported so apply.go and verify.go can share the same
 // transformation math; the strategy package is the single source of truth).
 
-
-
 // DigitsFromHex turns a hex digest into `length` decimal digits by
 // walking the input and mapping a-f to 0-5. If the input runs out of
 // decimal chars it wraps around.

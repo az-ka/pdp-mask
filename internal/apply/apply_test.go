@@ -129,7 +129,6 @@ func TestRulesForHeadersRejectsTraversal(t *testing.T) {
 	}
 }
 
-
 func TestApplyCSVRequiresSalt(t *testing.T) {
 	paths := writeApplyFixture(t, applyPlan)
 	_, err := ApplyCSV(Options{InputPath: paths.input, PlanPath: paths.plan, OutputPath: filepath.Join(paths.dir, "safe.csv"), Salt: []byte("short")})

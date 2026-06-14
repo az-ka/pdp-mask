@@ -180,4 +180,3 @@ func maskValue(salt []byte, rule rule, value string) string {
 	}
 	return s.Apply(digest, value)
 }
-

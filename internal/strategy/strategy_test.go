@@ -303,7 +303,7 @@ func TestDateShiftStrategy(t *testing.T) {
 		digest byte
 		want   string
 	}{
-		{byte('a' - ('a' % 28)), "01"},   // day = 1
+		{byte('a' - ('a' % 28)), "01"},     // day = 1
 		{byte('a' - ('a' % 28) + 9), "10"}, // day = 10
 	}
 	for _, tc := range cases {

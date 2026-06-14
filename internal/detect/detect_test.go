@@ -722,18 +722,18 @@ rules:
 		restoreRegexCache(originalCache)
 	}()
 
-// Set up the OLD rule directly (no LoadRules yet) and prime the cache
-// by calling matchValue once.
-ActiveRules = []Rule{
-	{
-		Name:           "oldrule",
-		Category:       "old_cat",
-		ColumnPatterns: []string{"old_col"},
-		ValuePattern:   `^OLD-[0-9]+$`,
-		ValueWeight:    0.80,
-		ColumnWeight:   0.60,
-	},
-}
+	// Set up the OLD rule directly (no LoadRules yet) and prime the cache
+	// by calling matchValue once.
+	ActiveRules = []Rule{
+		{
+			Name:           "oldrule",
+			Category:       "old_cat",
+			ColumnPatterns: []string{"old_col"},
+			ValuePattern:   `^OLD-[0-9]+$`,
+			ValueWeight:    0.80,
+			ColumnWeight:   0.60,
+		},
+	}
 	matches := matchValue("OLD-1")
 	if len(matches) != 1 || matches[0].category != "old_cat" {
 		t.Fatalf("pre-swap matchValue: got %+v, want one match with category old_cat", matches)
