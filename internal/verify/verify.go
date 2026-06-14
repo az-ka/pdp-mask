@@ -153,7 +153,7 @@ func Verify(opts Options) (*VerificationResult, error) {
 		return nil, err
 	}
 	if identicalCol != "" {
-		fail(&result.ArtifactShapeStatus, fmt.Sprintf("column %q is byte-identical in safe.csv (no-op apply)", identicalCol))
+		fail(&result.OutputLeakageStatus, fmt.Sprintf("column %q is byte-identical in safe.csv (no-op mask leaked the original value)", identicalCol))
 	}
 
 	for _, finding := range outputReport.Findings {

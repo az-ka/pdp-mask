@@ -186,6 +186,42 @@ columns:
 	mustContainIssue(t, result.Issues, "kept without mask")
 }
 
+func TestVerifyRejectsNoOpMask(t *testing.T) {
+	noOpFixtureCSV := `id,nik,note
+1,3173050101900001,keep me
+2,3173050101900002,
+3,3173050101900003,keep me
+`
+	noOpPlanYAML := `version: 1
+columns:
+  - column: "nik"
+    action: "mask"
+    type: "nik"
+    strategy: "deterministic_nik"
+`
+	paths := writeVerifyFixture(t, noOpFixtureCSV, noOpPlanYAML)
+	safeCSV := filepath.Join(paths.dir, "safe.csv")
+	if err := os.WriteFile(safeCSV, []byte(noOpFixtureCSV), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Verify(Options{
+		ConfigPath: paths.plan,
+		InputPath:  paths.input,
+		OutputPath: safeCSV,
+	})
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+	if result.Passed {
+		t.Fatalf("Verify passed but output is byte-identical to input (no-op mask); issues=%v", result.Issues)
+	}
+	if result.OutputLeakageStatus == "PASS" {
+		t.Fatalf("Verify reported OutputLeakageStatus=PASS despite byte-identical masked column; issues=%v", result.Issues)
+	}
+	mustContainIssue(t, result.Issues, "nik")
+}
+
+
 type verifyPaths struct {
 	dir   string
 	input string

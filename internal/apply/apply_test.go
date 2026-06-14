@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/az-ka/pdp-mask/internal/plan"
 )
 
 const applyFixture = `id,nama_lengkap,email,no_hp,nik,note
@@ -103,6 +105,29 @@ columns:
 		t.Fatalf("error = %q, want requires review", err.Error())
 	}
 }
+func TestRulesForHeadersRejectsTraversal(t *testing.T) {
+	headers := []string{"id", "nama_lengkap", "email"}
+	doc := &plan.Document{
+		Version: 1,
+		Columns: []plan.ColumnPlan{
+			{
+				Input:    "../data/customers.csv",
+				Column:   "nama_lengkap",
+				Action:   "mask",
+				Type:     "name",
+				Strategy: "deterministic_name_id",
+			},
+		},
+	}
+	rules, err := rulesForHeaders(doc, "uploads/customers.csv", headers)
+	if err == nil {
+		t.Fatalf("rulesForHeaders accepted traversal input; rules = %+v", rules)
+	}
+	if !strings.Contains(err.Error(), "../data/customers.csv") {
+		t.Fatalf("error = %q, want it to mention the traversal path", err.Error())
+	}
+}
+
 
 func TestApplyCSVRequiresSalt(t *testing.T) {
 	paths := writeApplyFixture(t, applyPlan)

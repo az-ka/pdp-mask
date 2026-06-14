@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"gopkg.in/yaml.v3"
@@ -126,8 +127,8 @@ type signal struct {
 	score    float64
 	evidence []string
 }
-
 type valueMatch struct {
+	name     string
 	category string
 	evidence string
 }
@@ -217,18 +218,36 @@ var ActiveRules = []Rule{
 	},
 }
 
-var regexCache = make(map[string]*regexp.Regexp)
+var (
+	regexCacheMu sync.RWMutex
+	regexCache   = make(map[string]*regexp.Regexp)
+)
 
 func getCachedRegex(pattern string) (*regexp.Regexp, error) {
-	if re, ok := regexCache[pattern]; ok {
+	regexCacheMu.RLock()
+	re, ok := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	if ok {
 		return re, nil
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, err
 	}
+	regexCacheMu.Lock()
 	regexCache[pattern] = re
+	regexCacheMu.Unlock()
 	return re, nil
+}
+
+// clearRegexCache drops every compiled pattern from the cache. It must be
+// called whenever ActiveRules is replaced, so that patterns tied to retired
+// rules cannot leak into later detections. Test-only callers should not rely
+// on this; the race-detector test only needs the production path to be safe.
+func clearRegexCache() {
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexp.Regexp)
+	regexCacheMu.Unlock()
 }
 
 func LoadRules(path string) error {
@@ -260,6 +279,7 @@ func LoadRules(path string) error {
 		newRules = append(newRules, rule)
 	}
 	ActiveRules = newRules
+	clearRegexCache()
 	return nil
 }
 
@@ -324,6 +344,7 @@ func matchValue(value string) []valueMatch {
 		}
 		if matched {
 			matches = append(matches, valueMatch{
+				name:     rule.Name,
 				category: rule.Category,
 				evidence: "value_pattern:" + rule.Name,
 			})

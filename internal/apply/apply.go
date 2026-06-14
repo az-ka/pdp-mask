@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/az-ka/pdp-mask/internal/detect"
@@ -145,6 +146,13 @@ func rulesForHeaders(doc *plan.Document, inputPath string, headers []string) (ma
 		}
 		if column.Action != "mask" {
 			return nil, fmt.Errorf("unsupported action %q for column %s", column.Action, column.Column)
+		}
+
+		// Reject explicit directory-traversal attempts (e.g. "../data/customers.csv")
+		// before the suffix-based input check, so a ".." segment cannot smuggle a
+		// planned column into a different sibling file.
+		if cleaned := filepath.Clean(column.Input); strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) || cleaned == ".." {
+			return nil, fmt.Errorf("planned column %s input %q escapes the project directory", column.Column, column.Input)
 		}
 		if column.Input != "" && column.Input != inputPath && !strings.HasSuffix(inputPath, string(os.PathSeparator)+column.Input) {
 			continue
