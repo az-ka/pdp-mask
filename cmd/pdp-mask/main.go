@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/az-ka/pdp-mask/internal/apply"
@@ -104,6 +105,7 @@ func runScan(args []string) error {
 	sampleRows := fs.Int("sample-rows", 500, "maximum non-empty values sampled per column")
 	preset := fs.String("preset", "indonesia", "detector preset")
 	rulesPath := fs.String("rules", "", "path to custom rules YAML pack")
+	followSymlinks := fs.Bool("follow-symlinks", false, "follow a symlinked input file (refused by default)")
 	flagArgs, inputs := splitScanArgs(args)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -123,14 +125,18 @@ func runScan(args []string) error {
 		return fmt.Errorf("unsupported preset %q", *preset)
 	}
 	input := inputs[0]
-	resolvedFormat, err := resolveFormat(input, *format)
+	scanInput, err := guardInputForScan(input, *followSymlinks)
+	if err != nil {
+		return err
+	}
+	resolvedFormat, err := resolveFormat(scanInput, *format)
 	if err != nil {
 		return err
 	}
 	if resolvedFormat != "csv" {
 		return fmt.Errorf("unsupported format %q", resolvedFormat)
 	}
-	report, err := scan.ScanCSV(input, scan.CSVOptions{SampleRows: *sampleRows})
+	report, err := scan.ScanCSV(scanInput, scan.CSVOptions{SampleRows: *sampleRows})
 	if err != nil {
 		return err
 	}
@@ -142,6 +148,37 @@ func runScan(args []string) error {
 		fmt.Fprintf(os.Stdout, "\nWrote JSON report: %s\n", *jsonPath)
 	}
 	return nil
+}
+
+// guardInputForScan mirrors apply.validateInputPath for the scan path: refuse
+// symlinks unless followSymlinks is set, and refuse inputs larger than
+// apply.MaxInputSize. Returns the path to feed to scan.ScanCSV.
+func guardInputForScan(inputPath string, followSymlinks bool) (string, error) {
+	info, err := os.Lstat(inputPath)
+	if err != nil {
+		return "", fmt.Errorf("stat input: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		if !followSymlinks {
+			return "", fmt.Errorf("refusing symlink input %q (use --follow-symlinks to override)", inputPath)
+		}
+		resolved, err := filepath.EvalSymlinks(inputPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve symlink input: %w", err)
+		}
+		resolvedInfo, err := os.Stat(resolved)
+		if err != nil {
+			return "", fmt.Errorf("stat resolved input: %w", err)
+		}
+		if resolvedInfo.Size() > apply.MaxInputSize {
+			return "", fmt.Errorf("input file %q is %d bytes, exceeds MaxInputSize (%d bytes)", inputPath, resolvedInfo.Size(), apply.MaxInputSize)
+		}
+		return resolved, nil
+	}
+	if info.Size() > apply.MaxInputSize {
+		return "", fmt.Errorf("input file %q is %d bytes, exceeds MaxInputSize (%d bytes)", inputPath, info.Size(), apply.MaxInputSize)
+	}
+	return inputPath, nil
 }
 
 func runPlan(args []string) error {
@@ -179,10 +216,27 @@ func runPlan(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(*outPath, plan.RenderYAML(doc), 0o644); err != nil {
+	if err := secureWriteFile(*outPath, plan.RenderYAML(doc)); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	printPlanReport(os.Stdout, scanPath, *outPath, doc)
+	return nil
+}
+
+// secureWriteFile creates path with O_EXCL (and O_NOFOLLOW on platforms that
+// support it) so the destination must not exist and must not be a symlink.
+// The O_EXCL policy is consistent with the --force opt-in: callers that
+// want overwrite behavior should pre-check and delete first. Mode is fixed
+// to 0o600 by apply.SecureOpenOutput.
+func secureWriteFile(path string, payload []byte) error {
+	f, err := apply.SecureOpenOutput(path)
+	if err != nil {
+		return fmt.Errorf("open output: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(payload); err != nil {
+		return fmt.Errorf("write output: %w", err)
+	}
 	return nil
 }
 
@@ -194,6 +248,7 @@ func runApply(args []string) error {
 	force := fs.Bool("force", false, "overwrite output file if it exists")
 	saltEnv := fs.String("salt-env", "PDP_MASK_SALT", "environment variable containing masking salt")
 	saltFile := fs.String("salt-file", "", "file containing masking salt")
+	followSymlinks := fs.Bool("follow-symlinks", false, "follow a symlinked input file (refused by default)")
 	flagArgs, inputs := splitArgs(args, applyFlagNeedsValue)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -219,10 +274,11 @@ func runApply(args []string) error {
 		return err
 	}
 	result, err := apply.ApplyCSV(apply.Options{
-		InputPath:  inputs[0],
-		PlanPath:   *configPath,
-		OutputPath: *outPath,
-		Salt:       salt,
+		InputPath:      inputs[0],
+		PlanPath:       *configPath,
+		OutputPath:     *outPath,
+		Salt:           salt,
+		FollowSymlinks: *followSymlinks,
 	})
 	if err != nil {
 		return err
@@ -239,9 +295,22 @@ func applyFlagNeedsValue(flagName string) bool {
 		return false
 	}
 }
-
 func loadSalt(envName, filePath string) ([]byte, error) {
 	if filePath != "" {
+		// Refuse to read a salt file that is readable by group or other.
+		// On Windows the kernel's permission bits are not exposed via
+		// os.FileMode (Go's WriteFile/Stat on Windows ignore the mode arg
+		// and always report 0o666 on the perm bits), so the check is a
+		// no-op there. Operators on Windows must rely on NTFS ACLs.
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(filePath)
+			if err != nil {
+				return nil, fmt.Errorf("stat salt file: %w", err)
+			}
+			if info.Mode().Perm()&0o077 != 0 {
+				return nil, fmt.Errorf("insecure salt file mode %s on %q: refusing (recommend: chmod 600 %q)", info.Mode(), filePath, filePath)
+			}
+		}
 		payload, err := os.ReadFile(filePath)
 		if err != nil {
 			return nil, fmt.Errorf("read salt file: %w", err)
@@ -307,7 +376,10 @@ func printScanReport(out *os.File, report *scan.Report) {
 }
 
 func writeJSON(path string, report *scan.Report) error {
-	file, err := os.Create(path)
+	// O_EXCL via apply.SecureOpenOutput so a pre-existing file or a symlink
+	// at `path` blocks the write; mode 0o600 is consistent with the apply
+	// --out policy.
+	file, err := apply.SecureOpenOutput(path)
 	if err != nil {
 		return fmt.Errorf("create json report: %w", err)
 	}

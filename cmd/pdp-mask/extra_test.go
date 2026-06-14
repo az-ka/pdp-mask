@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -798,4 +799,159 @@ func TestRunPlan_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// runScan / runApply symlink guards
+// ---------------------------------------------------------------------------
+
+// TestRunApplyRejectsSymlinkInputCLI asserts the default policy: a symlinked
+// input file is refused at the CLI layer before ApplyCSV runs.
+func TestRunApplyRejectsSymlinkInputCLI(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.csv")
+	planPath := filepath.Join(dir, "mask.yml")
+	link := filepath.Join(dir, "link.csv")
+	output := filepath.Join(dir, "safe.csv")
+	mustWriteFile(t, real, cliApplyCSV)
+	mustWriteFile(t, planPath, cliApplyPlan)
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	t.Setenv("PDP_MASK_SALT", "0123456789abcdef")
+
+	_, _, err := captureRun(t, []string{"apply", link, "--config", planPath, "--out", output})
+	if err == nil {
+		t.Fatal("expected error for symlinked input without --follow-symlinks")
+	}
+	if !strings.Contains(err.Error(), "refusing symlink input") {
+		t.Fatalf("err = %q, want contains 'refusing symlink input'", err.Error())
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output should not exist after refusal; stat err = %v", statErr)
+	}
+}
+
+// TestRunApplyFollowsSymlinkWithFlag asserts --follow-symlinks resolves the
+// symlink and ApplyCSV proceeds to produce a masked output file.
+func TestRunApplyFollowsSymlinkWithFlag(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.csv")
+	planPath := filepath.Join(dir, "mask.yml")
+	link := filepath.Join(dir, "link.csv")
+	output := filepath.Join(dir, "safe.csv")
+	mustWriteFile(t, real, cliApplyCSV)
+	mustWriteFile(t, planPath, cliApplyPlan)
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	t.Setenv("PDP_MASK_SALT", "0123456789abcdef")
+
+	_, _, err := captureRun(t, []string{"apply", link, "--config", planPath, "--out", output, "--follow-symlinks"})
+	if err != nil {
+		t.Fatalf("run apply with --follow-symlinks returned error: %v", err)
+	}
+	payload := string(mustReadFile(t, output))
+	if !strings.Contains(payload, "id,email,no_hp,note") {
+		t.Fatalf("output missing header row:\n%s", payload)
+	}
+	if strings.Contains(payload, "budi@example.test") {
+		t.Fatalf("output leaked raw PII after symlink follow:\n%s", payload)
+	}
+}
+
+// TestRunScanRejectsSymlinkInputCLI asserts the scan subcommand also refuses
+// a symlinked input by default. The FollowSymlinks override path mirrors
+// apply; we just need to pin the default-refusal at the scan boundary.
+func TestRunScanRejectsSymlinkInputCLI(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.csv")
+	link := filepath.Join(dir, "link.csv")
+	mustWriteFile(t, real, cliScanCSV)
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	_, _, err := captureRun(t, []string{"scan", link})
+	if err == nil {
+		t.Fatal("expected error for symlinked scan input without --follow-symlinks")
+	}
+	if !strings.Contains(err.Error(), "refusing symlink input") {
+		t.Fatalf("err = %q, want contains 'refusing symlink input'", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadSalt file-mode guard
+// ---------------------------------------------------------------------------
+
+// TestSaltFileRejectedIfWorldReadable pins the loadSalt mode check: a salt
+// file with group- or world-readable bits is refused. The check is gated to
+// non-Windows because Go's os.WriteFile / os.Stat on Windows ignore the
+// mode arg and always report 0o666 on the perm bits; on Windows the test
+// is skipped with a clear message.
+func TestSaltFileRejectedIfWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("salt file mode check is a no-op on Windows (Go ignores the WriteFile mode arg): %s", runtime.GOOS)
+	}
+
+	t.Run("accepts_0o600", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "salt")
+		if err := os.WriteFile(path, []byte("0123456789abcdef\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		salt, err := loadSalt("PDP_MASK_SALT_LONG_TEST", path)
+		if err != nil {
+			t.Fatalf("loadSalt returned error for 0o600 file: %v", err)
+		}
+		if string(salt) != "0123456789abcdef" {
+			t.Fatalf("salt = %q", string(salt))
+		}
+	})
+
+	t.Run("rejects_0o644", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "salt")
+		if err := os.WriteFile(path, []byte("0123456789abcdef\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadSalt("PDP_MASK_SALT_LONG_TEST", path)
+		if err == nil {
+			t.Fatal("loadSalt accepted a 0o644 salt file; the mode check did not fire")
+		}
+		if !strings.Contains(err.Error(), "insecure salt file mode") || !strings.Contains(err.Error(), "refusing") {
+			t.Fatalf("err = %q, want contains 'insecure salt file mode' and 'refusing'", err.Error())
+		}
+	})
+
+	t.Run("rejects_0o666", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "salt")
+		if err := os.WriteFile(path, []byte("0123456789abcdef\n"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadSalt("PDP_MASK_SALT_LONG_TEST", path)
+		if err == nil {
+			t.Fatal("loadSalt accepted a 0o666 salt file; the mode check did not fire")
+		}
+		if !strings.Contains(err.Error(), "insecure salt file mode") {
+			t.Fatalf("err = %q, want contains 'insecure salt file mode'", err.Error())
+		}
+	})
+
+	t.Run("rejects_0o640", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "salt")
+		if err := os.WriteFile(path, []byte("0123456789abcdef\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadSalt("PDP_MASK_SALT_LONG_TEST", path)
+		if err == nil {
+			t.Fatal("loadSalt accepted a 0o640 salt file; the mode check did not fire")
+		}
+		if !strings.Contains(err.Error(), "insecure salt file mode") {
+			t.Fatalf("err = %q, want contains 'insecure salt file mode'", err.Error())
+		}
+	})
 }

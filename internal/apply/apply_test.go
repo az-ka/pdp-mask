@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -220,5 +221,124 @@ func TestHMACIsDeterministic(t *testing.T) {
 		if got != first {
 			t.Fatalf("iteration %d: digest %q != %q", i, got, first)
 		}
+	}
+}
+
+// TestApplyRejectsOversizedInput exercises the MaxInputSize guard. The cap
+// is a package-level var so we shrink it for the test (the production value
+// is 1 GiB) and assert that a 100-byte input is rejected when the cap is 16.
+func TestApplyRejectsOversizedInput(t *testing.T) {
+	paths := writeApplyFixture(t, applyPlan)
+	output := filepath.Join(paths.dir, "safe.csv")
+
+	orig := MaxInputSize
+	MaxInputSize = 16
+	defer func() { MaxInputSize = orig }()
+
+	_, err := ApplyCSV(Options{InputPath: paths.input, PlanPath: paths.plan, OutputPath: output, Salt: []byte("0123456789abcdef")})
+	if err == nil {
+		t.Fatal("ApplyCSV accepted a 100-byte input against a 16-byte cap")
+	}
+	if !strings.Contains(err.Error(), "exceeds MaxInputSize") {
+		t.Fatalf("error = %q, want contains 'exceeds MaxInputSize'", err.Error())
+	}
+}
+
+// TestApplyRejectsSymlinkInputDefault exercises the default policy: the
+// symlink path is refused with the documented message. The FollowSymlinks
+// override is covered at the CLI layer in extra_test.go.
+func TestApplyRejectsSymlinkInputDefault(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.csv")
+	planPath := filepath.Join(dir, "mask.yml")
+	link := filepath.Join(dir, "link.csv")
+	if err := os.WriteFile(real, []byte(applyFixture), 0o644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	if err := os.WriteFile(planPath, []byte(applyPlan), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	output := filepath.Join(dir, "safe.csv")
+
+	_, err := ApplyCSV(Options{InputPath: link, PlanPath: planPath, OutputPath: output, Salt: []byte("0123456789abcdef")})
+	if err == nil {
+		t.Fatal("ApplyCSV accepted a symlink input without FollowSymlinks")
+	}
+	if !strings.Contains(err.Error(), "refusing symlink input") {
+		t.Fatalf("error = %q, want contains 'refusing symlink input'", err.Error())
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output should not exist after a refused symlink; stat err = %v", statErr)
+	}
+}
+
+// TestApplyFollowsSymlinkWhenOptedIn asserts the FollowSymlinks override
+// resolves the symlink and proceeds to mask the real file's content.
+func TestApplyFollowsSymlinkWhenOptedIn(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.csv")
+	planPath := filepath.Join(dir, "mask.yml")
+	link := filepath.Join(dir, "link.csv")
+	if err := os.WriteFile(real, []byte(applyFixture), 0o644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	if err := os.WriteFile(planPath, []byte(applyPlan), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	output := filepath.Join(dir, "safe.csv")
+
+	if _, err := ApplyCSV(Options{InputPath: link, PlanPath: planPath, OutputPath: output, Salt: []byte("0123456789abcdef"), FollowSymlinks: true}); err != nil {
+		t.Fatalf("ApplyCSV with FollowSymlinks rejected the symlink: %v", err)
+	}
+	payload, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(payload) == 0 {
+		t.Fatal("output is empty after a successful apply")
+	}
+	assertNoRawPII(t, string(payload))
+}
+
+// TestOutputFileModeIs0600 pins two contracts of the output file produced by
+// ApplyCSV:
+//  1. The file's permission bits are 0o600 (owner read/write only). On
+//     Windows the Go runtime reports 0o666 on the perm bits regardless of
+//     the mode arg passed to OpenFile, so the perm assertion is gated to
+//     non-Windows platforms; the O_EXCL refusal test below is portable.
+//  2. Re-running ApplyCSV with the same OutputPath fails because
+//     SecureOpenOutput opens the file with O_EXCL — an existing file at
+//     the destination is an error, not a silent clobber.
+func TestOutputFileModeIs0600(t *testing.T) {
+	paths := writeApplyFixture(t, applyPlan)
+	output := filepath.Join(paths.dir, "safe.csv")
+	salt := []byte("0123456789abcdef")
+
+	if _, err := ApplyCSV(Options{InputPath: paths.input, PlanPath: paths.plan, OutputPath: output, Salt: salt}); err != nil {
+		t.Fatalf("first ApplyCSV returned error: %v", err)
+	}
+
+	info, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("stat output: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("output is a symlink: %s", info.Mode())
+	}
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("output mode perm = %o, want 0o600", got)
+		}
+	}
+
+	_, err = ApplyCSV(Options{InputPath: paths.input, PlanPath: paths.plan, OutputPath: output, Salt: salt})
+	if err == nil {
+		t.Fatal("second ApplyCSV to the same output path succeeded; O_EXCL should have refused")
 	}
 }
