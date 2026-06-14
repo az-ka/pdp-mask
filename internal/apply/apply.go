@@ -146,7 +146,7 @@ func rulesForHeaders(doc *plan.Document, inputPath string, headers []string) (ma
 		if column.Action != "mask" {
 			return nil, fmt.Errorf("unsupported action %q for column %s", column.Action, column.Column)
 		}
-		if column.Input != "" && column.Input != inputPath && !strings.HasSuffix(inputPath, column.Input) {
+		if column.Input != "" && column.Input != inputPath && !strings.HasSuffix(inputPath, string(os.PathSeparator)+column.Input) {
 			continue
 		}
 		index, ok := indexes[column.Column]
