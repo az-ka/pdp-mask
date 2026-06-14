@@ -2,6 +2,8 @@ package strategy
 
 import (
 	"encoding/hex"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -236,10 +238,12 @@ func TestNameIDStrategy(t *testing.T) {
 	if s.Name() != "deterministic_name_id" {
 		t.Fatalf("Name() = %q", s.Name())
 	}
-	// digest[0] = 'a' = 97, 97%8 = 1 → firstNames[1] = "Rina"
-	// digest[1] = 'b' = 98, 98%8 = 2 → lastNames[2] = "Lestari"
+	// digest[0:2] = "ab" = 0xab = 171, 171 % 64 = 43
+	//   → firstNames[43] = "Dedi"
+	// digest[2:4] = "ab" = 0xab = 171, 171 % 64 = 43
+	//   → lastNames[43] = "Irawan"
 	got := s.Apply(ab32, "Budi Santoso")
-	want := "Rina Lestari"
+	want := "Dedi Irawan"
 	if got != want {
 		t.Fatalf("Apply = %q, want %q", got, want)
 	}
@@ -262,9 +266,10 @@ func TestAddressIDStrategy(t *testing.T) {
 	if s.Name() != "deterministic_address_id" {
 		t.Fatalf("Name() = %q", s.Name())
 	}
-	// DigitsFromHex(ab32, 3) → "010"
+	// digest[0:4] = "abab"; digest[4:8] = "abab" — 4 lowercase hex
+	// chars each, joined with a dash.
 	got := s.Apply(ab32, "Jl. Sudirman No.1, Jakarta")
-	want := "Jl. Masked 010, Kota Contoh"
+	want := "Jl. Masked abab-abab, Kota Contoh"
 	if got != want {
 		t.Fatalf("Apply = %q, want %q", got, want)
 	}
@@ -274,7 +279,7 @@ func TestAddressIDStrategy(t *testing.T) {
 	if s.Placeholder("Jl. Sudirman 1, Jakarta") { // wrong prefix
 		t.Fatal("Placeholder(wrong prefix) = true, want false")
 	}
-	if s.Placeholder("Jl. Masked 010 Kota Contoh") { // missing comma suffix
+	if s.Placeholder("Jl. Masked abab-abab Kota Contoh") { // missing comma suffix
 		t.Fatal("Placeholder(missing suffix) = true, want false")
 	}
 }
@@ -329,18 +334,24 @@ func TestDigitsStrategy(t *testing.T) {
 	if got != want {
 		t.Fatalf("Apply = %q, want %q", got, want)
 	}
-	// Per design doc: all-digit values are placeholders (the legacy
-	// isMaskedPlaceholder had no case for deterministic_digits, so the
-	// default "masked_" branch fired; we keep that semantic with an
-	// all-digit heuristic).
-	if !s.Placeholder("123456") {
-		t.Fatal("Placeholder(all digits) = false, want true")
+	// Strict Placeholder: a value with only digits is NOT a
+	// placeholder (it could be a raw NIK/phone). The value must
+	// contain at least one allowed-punctuation rune to be
+	// recognised as masked output. Letters are always rejected.
+	if s.Placeholder("123456") {
+		t.Fatal("Placeholder(all digits) = true, want false")
 	}
 	if s.Placeholder("") {
 		t.Fatal("Placeholder(empty) = true, want false")
 	}
 	if s.Placeholder("ABC123") {
-		t.Fatal("Placeholder(mixed) = true, want false")
+		t.Fatal("Placeholder(letters+mixed) = true, want false")
+	}
+	if !s.Placeholder("01.234.567.8-901") {
+		t.Fatal("Placeholder(digit-shaped w/ punct) = false, want true")
+	}
+	if s.Placeholder("01#234") { // '#' is not in the allowed alphabet
+		t.Fatal("Placeholder(disallowed punct) = true, want false")
 	}
 }
 
@@ -426,17 +437,20 @@ func TestFormatLikeDigits(t *testing.T) {
 }
 
 func TestFakeName(t *testing.T) {
-	// digest[0]='a' → 97%8=1 → "Rina"; digest[1]='b' → 98%8=2 → "Lestari"
-	if got := FakeName(ab32); got != "Rina Lestari" {
-		t.Fatalf("FakeName(ab32) = %q, want Rina Lestari", got)
+	// digest[0:2]="ab"=0xab=171, 171%64=43 → firstNames[43]="Dedi"
+	// digest[2:4]="ab"=0xab=171, 171%64=43 → lastNames[43]="Irawan"
+	if got := FakeName(ab32); got != "Dedi Irawan" {
+		t.Fatalf("FakeName(ab32) = %q, want Dedi Irawan", got)
 	}
-	// digest[0]='A'=65, 65%8=1 → "Rina"; digest[1]='A'=65%8=1 → "Pratama"
-	if got := FakeName("A" + strings.Repeat("x", 63)); got != "Rina Pratama" {
-		t.Fatalf("FakeName(Ax...) = %q, want Rina Pratama", got)
+	// digest[0:2]="0a"=10, 10%64=10 → firstNames[10]="Sari"
+	// digest[2:4]="0b"=11, 11%64=11 → lastNames[11]="Anggraini"
+	if got := FakeName("0a0b" + strings.Repeat("c", 60)); got != "Sari Anggraini" {
+		t.Fatalf("FakeName(0a0b...) = %q, want Sari Anggraini", got)
 	}
-	// digest[0]=digest[1]='\x00' → 0%8=0 → "Andi Pratama"
-	if got := FakeName("\x00\x00" + strings.Repeat("x", 62)); got != "Andi Pratama" {
-		t.Fatalf("FakeName(\\0\\0) = %q, want Andi Pratama", got)
+	// digest[0:2]="\x00\x00"=0, 0%64=0 → firstNames[0]="Andi"
+	// digest[2:4]="\x00\x00"=0, 0%64=0 → lastNames[0]="Pratama"
+	if got := FakeName(strings.Repeat("\x00", 64)); got != "Andi Pratama" {
+		t.Fatalf("FakeName(\\0*64) = %q, want Andi Pratama", got)
 	}
 }
 
@@ -457,5 +471,100 @@ func TestTwoDigitDay(t *testing.T) {
 	// 27%28+1=28. Need x%28=27. '\x1b'=27.
 	if got := TwoDigitDay("\x1b" + strings.Repeat("x", 63)); got != "28" {
 		t.Fatalf("TwoDigitDay(0x1b) = %q, want 28", got)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// P1 keyspace pin tests (Chain 2 fixes)
+// -----------------------------------------------------------------------------
+
+// TestAddressKeyspaceExceeds10k feeds many distinct salts into the same
+// input cell and asserts the strategy produces strictly more than
+// 10000 distinct masked addresses. The old keyspace was 3 decimal
+// digits = 1000 outputs; this test pins the 65536-entry
+// (area=4 hex chars) keyspace.
+func TestAddressKeyspaceExceeds10k(t *testing.T) {
+	s := addressIDStrategy{defaultWasChanged}
+	// 10001 samples gives effectively-zero collision probability in
+	// the joint (digest[0:4], digest[4:8]) keyspace of 65536²
+	// pairs. We need strictly more than 10000 distinct outputs;
+	// the test asserts > 10000.
+	const n = 10001
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		salt := []byte(fmt.Sprintf("salt-%010d", i))
+		digest := Digest(salt, "address", "deterministic_address_id", "Jl. Sudirman 1")
+		seen[s.Apply(digest, "Jl. Sudirman 1")] = struct{}{}
+	}
+	if got := len(seen); got <= 10000 {
+		t.Fatalf("distinct masked addresses = %d, want > 10000", got)
+	}
+	t.Logf("distinct masked addresses across %d salts = %d", n, len(seen))
+}
+
+// TestNameKeyspaceExceeds1000 is the name-side counterpart: 64*64 =
+// 4096 distinct pairs, comfortably above the 1000 threshold.
+func TestNameKeyspaceExceeds1000(t *testing.T) {
+	// With 10000 distinct salts driving distinct digests, the
+	// expected distinct first*last pairs is
+	// 64*64 * (1 - (1 - 1/(64*64))^10000) ≈ 3964, far above 1000.
+	const n = 10000
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		salt := []byte(fmt.Sprintf("salt-%010d", i))
+		digest := Digest(salt, "name", "deterministic_name_id", "Budi Santoso")
+		seen[FakeName(digest)] = struct{}{}
+	}
+	if got := len(seen); got <= 1000 {
+		t.Fatalf("distinct fake names = %d, want > 1000", got)
+	}
+	t.Logf("distinct fake names across %d salts = %d", n, len(seen))
+}
+
+// TestDigitsFormatAware pins the three contract assertions for
+// deterministic_digits:
+//
+//  1. The doc comment in builtins.go explicitly states that the
+//     output preserves the input's punctuation layout "verbatim".
+//  2. FormatLikeDigits leaves non-digit runes untouched: digits
+//     are replaced in order, punctuation is passed through.
+//  3. A fixed input/output pair cements the contract for future
+//     readers.
+//
+// The "doc" check reads the source file directly so a drive-by edit
+// that drops the keyword fails the test even if the runtime
+// behaviour is unchanged.
+func TestDigitsFormatAware(t *testing.T) {
+	// 1. Doc comment asserts the verbatim layout contract.
+	// Tests run with cwd set to the package directory
+	// (internal/strategy/), so the source is "builtins.go" relative
+	// to the test binary.
+	const source = "builtins.go"
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "verbatim") {
+		t.Fatalf("%s is missing the \"verbatim\" contract keyword for deterministic_digits", source)
+	}
+	if !strings.Contains(src, "deterministic_digits") {
+		t.Fatalf("%s is missing the deterministic_digits section", source)
+	}
+
+	// 2. FormatLikeDigits preserves the dash in "12-34" and replaces
+	// the four digit positions with the four bytes of "abcd".
+	if got := FormatLikeDigits("12-34", "abcd"); got != "ab-cd" {
+		t.Fatalf("FormatLikeDigits(\"12-34\", \"abcd\") = %q, want %q", got, "ab-cd")
+	}
+
+	// 3. Fixed input/output pin: an NPWP-shaped input keeps its
+	// dots and dash, with digit positions filled in order.
+	if got := FormatLikeDigits("12.34", "12345678"); got != "12.34" {
+		t.Fatalf("FormatLikeDigits(\"12.34\", \"12345678\") = %q, want %q", got, "12.34")
+	}
+	// And a 4-digit-with-dash shape exercises a non-trivial pass-through.
+	if got := FormatLikeDigits("0-0-0-0", "abcd"); got != "a-b-c-d" {
+		t.Fatalf("FormatLikeDigits(\"0-0-0-0\", \"abcd\") = %q, want %q", got, "a-b-c-d")
 	}
 }

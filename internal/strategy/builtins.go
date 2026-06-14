@@ -6,11 +6,37 @@ import (
 )
 
 // firstNames and lastNames back the deterministic_name_id strategy.
-// They mirror the lists in strategy.FakeName and verify.isMaskedPlaceholder
-// and must stay in sync with both.
+// They are the single source of truth shared by strategy.FakeName
+// (used to produce masked output) and nameIDStrategy.Placeholder
+// (used by verify to recognise a value as already-masked).
+//
+// Keyspace contract: with N first names and M last names, the
+// distinct-pair count is N*M. digest[0:2] is parsed as a single
+// hex byte (0..255) and reduced mod N for the first index; digest[2:4]
+// is parsed the same way and reduced mod M for the last index. To
+// keep the keyspace comfortably above 1000 the lists below carry
+// 64 entries each, giving 64*64 = 4096 distinct pairs.
 var (
-	firstNames = []string{"Andi", "Rina", "Dewi", "Bima", "Maya", "Raka", "Nadia", "Fajar"}
-	lastNames  = []string{"Pratama", "Wijaya", "Lestari", "Saputra", "Utami", "Santoso", "Permata", "Nugraha"}
+	firstNames = []string{
+		"Andi", "Rina", "Dewi", "Bima", "Maya", "Raka", "Nadia", "Fajar",
+		"Putri", "Bagas", "Sari", "Doni", "Lina", "Yoga", "Tari", "Reza",
+		"Angga", "Citra", "Dimas", "Eka", "Fitri", "Galih", "Hana", "Indra",
+		"Jaka", "Kirana", "Lutfi", "Mega", "Nanda", "Oki", "Putu", "Qori",
+		"Rangga", "Sinta", "Tio", "Uli", "Vina", "Wahyu", "Yusuf", "Zara",
+		"Asep", "Bayu", "Cahya", "Dedi", "Endah", "Feri", "Gita", "Hari",
+		"Ika", "Joko", "Kiki", "Lia", "Made", "Nia", "Omar", "Pandu",
+		"Qila", "Rio", "Sasa", "Toni", "Ujang", "Vera", "Wawan", "Yanto",
+	}
+	lastNames = []string{
+		"Pratama", "Wijaya", "Lestari", "Saputra", "Utami", "Santoso", "Permata", "Nugraha",
+		"Sukma", "Hidayat", "Maulana", "Anggraini", "Setiawan", "Kusuma", "Prasetya", "Wibowo",
+		"Nugroho", "Halim", "Syahputra", "Ramadhan", "Firmansyah", "Haryanto", "Saputro", "Hartono",
+		"Suharto", "Susanto", "Suryanto", "Pangestu", "Kurniawan", "Suryani", "Handayani", "Maharani",
+		"Putri", "Adiputra", "Wicaksono", "Gunawan", "Budiman", "Chandra", "Dewantara", "Effendi",
+		"Fadhil", "Ginting", "Hutapea", "Irawan", "Junaidi", "Kusnadi", "Lubis", "Munandar",
+		"Napitupulu", "Ompusunggu", "Pohan", "Qodir", "Rambe", "Sinaga", "Tobing", "Ujung",
+		"Verawati", "Waruwu", "Yulianto", "Zebua", "Astuti", "Bachtiar", "Cahyadi", "Damanik",
+	}
 )
 
 // defaultWasChanged is the shared WasChanged implementation: a value
@@ -125,6 +151,15 @@ func nameLookup(names []string) map[string]bool {
 
 // -----------------------------------------------------------------------------
 // 6. deterministic_address_id
+//
+// Keyspace contract: the area code uses digest[0:4] (4 lowercase hex
+// chars = 16 bits = 65536 values) and the street segment uses
+// digest[4:8] (another 65536 values), giving 65536 * 65536 potential
+// pairs. The Placeholder check looks only at the surrounding
+// "Jl. Masked " / ", Kota Contoh" wrapper; it does not try to
+// validate the hex body so a value with garbled hex is still
+// recognised as masked (verifying digit positions would require the
+// original, which Placeholder does not have).
 // -----------------------------------------------------------------------------
 
 type addressIDStrategy struct {
@@ -134,7 +169,7 @@ type addressIDStrategy struct {
 func (addressIDStrategy) Name() string { return "deterministic_address_id" }
 
 func (addressIDStrategy) Apply(digest, original string) string {
-	return "Jl. Masked " + DigitsFromHex(digest, 3) + ", Kota Contoh"
+	return "Jl. Masked " + digest[0:4] + "-" + digest[4:8] + ", Kota Contoh"
 }
 
 func (addressIDStrategy) Placeholder(value string) bool {
@@ -161,6 +196,22 @@ func (dateShiftStrategy) Placeholder(value string) bool {
 
 // -----------------------------------------------------------------------------
 // 8. deterministic_digits
+//
+// Format contract: the output preserves the input's punctuation
+// layout verbatim; only the digit positions are replaced, in order,
+// with bytes derived from the digest (see FormatLikeDigits). The
+// non-digit characters (dots, dashes, spaces, etc.) are passed
+// through unchanged. This means the masking leaks the *shape* of the
+// input (e.g. a 16-digit NIK stays 16 digits, a 12.345.678.9-012
+// NPWP keeps its dots and dash) but never the digits themselves.
+//
+// Placeholder is a strict heuristic: a value is recognised as
+// already-masked only if it contains at least one non-digit rune
+// from a small punctuation alphabet AND no letters. All-digit
+// values are rejected as placeholders because a raw NIK, phone, or
+// NPWP would otherwise be misclassified as masked. The strictest
+// possible check would compare punctuation against the original,
+// but Placeholder does not have access to the original value.
 // -----------------------------------------------------------------------------
 
 type digitsStrategy struct {
@@ -173,20 +224,33 @@ func (digitsStrategy) Apply(digest, original string) string {
 	return FormatLikeDigits(original, DigitsFromHex(digest, CountDigits(original)))
 }
 
-// Placeholder is a heuristic: the legacy isMaskedPlaceholder switch had
-// no "deterministic_digits" case and fell through to the default
-// "masked_" branch. The design doc says to keep that behavior, so we
-// treat all-digit values as placeholders.
+// digitsPunctuation is the set of non-digit runes that
+// deterministic_digits may pass through verbatim from the original.
+// Letters are deliberately excluded: a letter-bearing value
+// cannot be the output of this strategy because letters never
+// appear in either the input (which is digit-shaped) or the digest
+// (which is consumed digit-by-digit only at digit positions).
+const digitsPunctuation = " .-,:/"
+
 func (digitsStrategy) Placeholder(value string) bool {
 	if value == "" {
 		return false
 	}
+	hasPunct := false
 	for _, r := range value {
-		if r < '0' || r > '9' {
+		switch {
+		case r >= '0' && r <= '9':
+			// digit slot: allowed
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			// letters never survive Apply, so this cannot be masked output
+			return false
+		case strings.ContainsRune(digitsPunctuation, r):
+			hasPunct = true
+		default:
 			return false
 		}
 	}
-	return true
+	return hasPunct
 }
 
 // -----------------------------------------------------------------------------
@@ -282,10 +346,36 @@ func FormatLikeDigits(original, digits string) string {
 	return b.String()
 }
 
-// FakeName picks a first and last name deterministically from the
-// first two bytes of the digest.
+// hexPairValue decodes a 2-character hex string into a number in
+// 0..255. It is used by FakeName to widen the name keyspace: each
+// pair contributes 256 distinct inputs which, reduced modulo the
+// 64-entry lists below, covers all 64 indices.
+func hexPairValue(s string) int {
+	return hexDigit(s[0])*16 + hexDigit(s[1])
+}
+
+// hexDigit decodes one ASCII hex character to its numeric value
+// (0..15). Both lowercase and uppercase are accepted; anything
+// outside the hex alphabet falls back to 0.
+func hexDigit(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c - 'a' + 10)
+	case c >= 'A' && c <= 'F':
+		return int(c - 'A' + 10)
+	}
+	return 0
+}
+
+// FakeName picks a first and last name deterministically from
+// digest[0:2] and digest[2:4] parsed as hex bytes (each 0..255),
+// reduced modulo the corresponding list size.
 func FakeName(digest string) string {
-	return firstNames[int(digest[0])%len(firstNames)] + " " + lastNames[int(digest[1])%len(lastNames)]
+	first := hexPairValue(digest[0:2]) % len(firstNames)
+	last := hexPairValue(digest[2:4]) % len(lastNames)
+	return firstNames[first] + " " + lastNames[last]
 }
 
 // TwoDigitDay returns a zero-padded day-of-month (01-28) derived
