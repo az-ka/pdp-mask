@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/az-ka/pdp-mask/internal/plan"
+	"github.com/az-ka/pdp-mask/internal/strategy"
 )
 
 const applyFixture = `id,nama_lengkap,email,no_hp,nik,note
@@ -184,6 +185,41 @@ func assertNoRawPII(t *testing.T, text string) {
 	for _, raw := range []string{"Budi Santoso", "budi@example.test", "081234567890", "3173050101900001", "siti@example.test"} {
 		if strings.Contains(text, raw) {
 			t.Fatalf("output leaked raw value %q:\n%s", raw, text)
+		}
+	}
+}
+
+// The tests below pin the HMAC keying contract that maskValue now relies
+// on. apply.go no longer owns digestHex; it calls strategy.Digest. If a
+// future refactor ever drops the strategy name or the column from the
+// HMAC key, these tests fail loudly instead of silently changing masked
+// output for every existing plan.
+
+func TestHMACKeyingIsNameAware(t *testing.T) {
+	salt := []byte("0123456789abcdef")
+	email := strategy.Digest(salt, "col", "deterministic_email", "value")
+	nik := strategy.Digest(salt, "col", "deterministic_nik", "value")
+	if email == nik {
+		t.Fatalf("strategy name must change digest, got %q for both", email)
+	}
+}
+
+func TestHMACKeyingIncludesColumn(t *testing.T) {
+	salt := []byte("0123456789abcdef")
+	a := strategy.Digest(salt, "a", "deterministic_email", "value")
+	b := strategy.Digest(salt, "b", "deterministic_email", "value")
+	if a == b {
+		t.Fatalf("column must change digest, got %q for both", a)
+	}
+}
+
+func TestHMACIsDeterministic(t *testing.T) {
+	salt := []byte("0123456789abcdef")
+	first := strategy.Digest(salt, "col", "deterministic_email", "value")
+	for i := 0; i < 100; i++ {
+		got := strategy.Digest(salt, "col", "deterministic_email", "value")
+		if got != first {
+			t.Fatalf("iteration %d: digest %q != %q", i, got, first)
 		}
 	}
 }

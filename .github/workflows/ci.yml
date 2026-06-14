@@ -33,6 +33,13 @@ jobs:
       - name: Run unit tests
         run: go test -v ./...
 
+      - name: Forbid CategoryRequiresSalt
+        run: |
+          if grep -rn 'CategoryRequiresSalt' --exclude-dir=.git --exclude-dir=.github .; then
+            echo "::error::CategoryRequiresSalt must not be re-introduced. Use internal/strategy for per-category salt policy."
+            exit 1
+          fi
+
   verify-fixtures:
     name: Verify CSV Fixtures
     runs-on: ubuntu-latest

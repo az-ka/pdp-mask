@@ -221,6 +221,52 @@ columns:
 	mustContainIssue(t, result.Issues, "nik")
 }
 
+func TestVerifyRejectsNoOpMaskAtStrategyLevel(t *testing.T) {
+	// Input has three NIKs that all look 16-char digit-shaped (so the
+	// legacy placeholder-shape check accepts every row). Output keeps
+	// the first and third NIK byte-identical to the input and only
+	// changes the second. The column as a whole therefore differs
+	// (the pre-fix column-level identical check does NOT trip), yet
+	// two out of three rows leaked their raw value through the mask.
+	// The per-row strategy.WasChanged check is what catches this.
+	noOpFixtureCSV := `id,nik,note
+1,0000000000000001,keep me
+2,0000000000000002,keep me
+3,0000000000000003,keep me
+`
+	noOpOutputCSV := `id,nik,note
+1,0000000000000001,keep me
+2,9999999999999999,keep me
+3,0000000000000003,keep me
+`
+	noOpPlanYAML := `version: 1
+columns:
+  - column: "nik"
+    action: "mask"
+    type: "nik"
+    strategy: "deterministic_nik"
+`
+	paths := writeVerifyFixture(t, noOpFixtureCSV, noOpPlanYAML)
+	safeCSV := filepath.Join(paths.dir, "safe.csv")
+	if err := os.WriteFile(safeCSV, []byte(noOpOutputCSV), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Verify(Options{
+		ConfigPath: paths.plan,
+		InputPath:  paths.input,
+		OutputPath: safeCSV,
+	})
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+	if result.Passed {
+		t.Fatalf("Verify passed but masked column leaked raw value at the per-row level; issues=%v", result.Issues)
+	}
+	if result.OutputLeakageStatus == "PASS" {
+		t.Fatalf("Verify reported OutputLeakageStatus=PASS despite per-row strategy.WasChanged finding; issues=%v", result.Issues)
+	}
+	mustContainIssue(t, result.Issues, "nik")
+}
 
 type verifyPaths struct {
 	dir   string

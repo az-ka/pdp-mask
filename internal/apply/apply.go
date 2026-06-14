@@ -1,18 +1,15 @@
 package apply
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/csv"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/az-ka/pdp-mask/internal/detect"
 	"github.com/az-ka/pdp-mask/internal/plan"
+	"github.com/az-ka/pdp-mask/internal/strategy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,7 +109,6 @@ func ApplyCSV(opts Options) (Result, error) {
 
 type rule struct {
 	Column   string
-	Type     string
 	Strategy string
 }
 
@@ -161,114 +157,27 @@ func rulesForHeaders(doc *plan.Document, inputPath string, headers []string) (ma
 		if !ok {
 			return nil, fmt.Errorf("planned column %s not found in CSV header", column.Column)
 		}
-		rules[index] = rule{Column: column.Column, Type: column.Type, Strategy: column.Strategy}
+		rules[index] = rule{Column: column.Column, Strategy: column.Strategy}
 	}
 	return rules, nil
 }
 
+// maskValue looks up the strategy registered for rule.Strategy and asks
+// it to mask `value`. The HMAC digest is keyed on (column, strategy
+// name, value) by strategy.Digest, so reclassifying a column under a
+// different strategy name cannot collide with the previous category's
+// output. If no strategy is registered (defensive: indicates a plan
+// that escaped validation), fall back to the redaction-style prefix
+// so the raw PII is never written through.
 func maskValue(salt []byte, rule rule, value string) string {
 	if value == "" {
 		return value
 	}
-	digest := digestHex(salt, rule, value)
-	switch rule.Strategy {
-	case "deterministic_email":
-		return "user_" + digest[:12] + "@example.invalid"
-	case "deterministic_phone_id":
-		return "081" + digitsFromHex(digest, 9)
-	case "deterministic_nik":
-		return digitsFromHex(digest, 16)
-	case "deterministic_npwp":
-		return formatLikeDigits(value, digitsFromHex(digest, countDigits(value)))
-	case "deterministic_name_id":
-		return fakeName(digest)
-	case "deterministic_address_id":
-		return "Jl. Masked " + digitsFromHex(digest, 3) + ", Kota Contoh"
-	case "date_shift":
-		return "1990-01-" + twoDigitDay(digest)
-	case "deterministic_digits":
-		return formatLikeDigits(value, digitsFromHex(digest, countDigits(value)))
-	default:
+	digest := strategy.Digest(salt, rule.Column, rule.Strategy, value)
+	s, ok := strategy.Get(rule.Strategy)
+	if !ok {
 		return "masked_" + digest[:16]
 	}
+	return s.Apply(digest, value)
 }
 
-func digestHex(salt []byte, rule rule, value string) string {
-	mac := hmac.New(sha256.New, salt)
-	mac.Write([]byte(rule.Type))
-	mac.Write([]byte{0x1f})
-	mac.Write([]byte(rule.Column))
-	mac.Write([]byte{0x1f})
-	mac.Write([]byte(value))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func digitsFromHex(hexValue string, length int) string {
-	if length <= 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(length)
-	for b.Len() < length {
-		for _, r := range hexValue {
-			if b.Len() == length {
-				break
-			}
-			if r >= '0' && r <= '9' {
-				b.WriteRune(r)
-				continue
-			}
-			b.WriteByte(byte((r-'a')%10) + '0')
-		}
-	}
-	return b.String()
-}
-
-func countDigits(value string) int {
-	count := 0
-	for _, r := range value {
-		if r >= '0' && r <= '9' {
-			count++
-		}
-	}
-	return count
-}
-
-func formatLikeDigits(original, digits string) string {
-	var b strings.Builder
-	index := 0
-	for _, r := range original {
-		if r >= '0' && r <= '9' {
-			if index < len(digits) {
-				b.WriteByte(digits[index])
-				index++
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func fakeName(digest string) string {
-	first := []string{"Andi", "Rina", "Dewi", "Bima", "Maya", "Raka", "Nadia", "Fajar"}
-	last := []string{"Pratama", "Wijaya", "Lestari", "Saputra", "Utami", "Santoso", "Permata", "Nugraha"}
-	return first[int(digest[0])%len(first)] + " " + last[int(digest[1])%len(last)]
-}
-
-func twoDigitDay(digest string) string {
-	day := int(digest[0])%28 + 1
-	if day < 10 {
-		return fmt.Sprintf("0%d", day)
-	}
-	return fmt.Sprintf("%d", day)
-}
-
-func CategoryRequiresSalt(category string) bool {
-	switch category {
-	case detect.CategoryEmail, detect.CategoryPhoneID, detect.CategoryNIK, detect.CategoryNPWP, detect.CategoryName, detect.CategoryAddress, detect.CategoryDateOfBirth, detect.CategoryBankAccount:
-		return true
-	default:
-		return true
-	}
-}

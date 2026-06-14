@@ -10,6 +10,7 @@ import (
 
 	"github.com/az-ka/pdp-mask/internal/plan"
 	"github.com/az-ka/pdp-mask/internal/scan"
+	"github.com/az-ka/pdp-mask/internal/strategy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -65,19 +66,6 @@ func Verify(opts Options) (*VerificationResult, error) {
 		result.Passed = false
 		result.Issues = append(result.Issues, msg)
 	}
-
-	knownStrategies := map[string]bool{
-		"deterministic_email":      true,
-		"deterministic_phone_id":   true,
-		"deterministic_nik":        true,
-		"deterministic_npwp":       true,
-		"deterministic_name_id":    true,
-		"deterministic_address_id": true,
-		"date_shift":               true,
-		"deterministic_digits":     true,
-		"deterministic_redaction":  true,
-	}
-
 	planColumns := make(map[string]plan.ColumnPlan)
 	for _, col := range doc.Columns {
 		planColumns[col.Column] = col
@@ -87,7 +75,7 @@ func Verify(opts Options) (*VerificationResult, error) {
 		if col.Action == "mask" {
 			if col.Strategy == "" {
 				fail(&result.StrategyValStatus, fmt.Sprintf("mask column %q has empty strategy", col.Column))
-			} else if !knownStrategies[col.Strategy] && !strings.HasPrefix(col.Strategy, "masked_") {
+			} else if _, ok := strategy.Get(col.Strategy); !ok && !strings.HasPrefix(col.Strategy, "masked_") {
 				fail(&result.StrategyValStatus, fmt.Sprintf("column %q has unknown strategy %q", col.Column, col.Strategy))
 			}
 		}
@@ -238,10 +226,14 @@ func checkIdenticalMaskedColumns(inputPath, outputPath string, planColumns map[s
 	_ = outputHeaders
 
 	maskCols := make(map[int]string)
+	maskStrategies := make(map[int]strategy.Strategy)
 	for idx, header := range inputHeaders {
 		colRule, planned := planColumns[header]
 		if planned && colRule.Action == "mask" {
 			maskCols[idx] = header
+			if s, ok := strategy.Get(colRule.Strategy); ok {
+				maskStrategies[idx] = s
+			}
 		}
 	}
 
@@ -263,7 +255,7 @@ func checkIdenticalMaskedColumns(inputPath, outputPath string, planColumns map[s
 			return "", nil
 		}
 
-		for idx := range maskCols {
+		for idx, colName := range maskCols {
 			if idx >= len(inputRec) || idx >= len(outputRec) {
 				continue
 			}
@@ -274,6 +266,17 @@ func checkIdenticalMaskedColumns(inputPath, outputPath string, planColumns map[s
 			}
 			if inVal != outVal {
 				differSeen[idx] = true
+				continue
+			}
+			if inVal == "" {
+				continue
+			}
+			s, ok := maskStrategies[idx]
+			if !ok {
+				continue
+			}
+			if !s.WasChanged(inVal, outVal) {
+				return colName, nil
 			}
 		}
 	}
@@ -287,7 +290,7 @@ func checkIdenticalMaskedColumns(inputPath, outputPath string, planColumns map[s
 	return "", nil
 }
 
-func verifyColumnPlaceholders(path, columnName, strategy string) (bool, error) {
+func verifyColumnPlaceholders(path, columnName, strategyName string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -310,6 +313,11 @@ func verifyColumnPlaceholders(path, columnName, strategy string) (bool, error) {
 		return false, nil
 	}
 
+	s, ok := strategy.Get(strategyName)
+	if !ok {
+		return false, fmt.Errorf("unknown strategy %q", strategyName)
+	}
+
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -325,46 +333,9 @@ func verifyColumnPlaceholders(path, columnName, strategy string) (bool, error) {
 		if val == "" {
 			continue
 		}
-		if !isMaskedPlaceholder(val, strategy) {
+		if !s.Placeholder(val) {
 			return false, nil
 		}
 	}
 	return true, nil
-}
-
-func isMaskedPlaceholder(value string, strategy string) bool {
-	switch strategy {
-	case "deterministic_email":
-		return strings.HasPrefix(value, "user_") && strings.HasSuffix(value, "@example.invalid")
-	case "deterministic_phone_id":
-		return strings.HasPrefix(value, "081") && len(value) == 12
-	case "deterministic_nik":
-		return len(value) == 16
-	case "deterministic_npwp":
-		return countDigits(value) == 15 || countDigits(value) == 16
-	case "deterministic_address_id":
-		return strings.HasPrefix(value, "Jl. Masked ") && strings.HasSuffix(value, ", Kota Contoh")
-	case "date_shift":
-		return strings.HasPrefix(value, "1990-01-")
-	case "deterministic_name_id":
-		parts := strings.Split(value, " ")
-		if len(parts) != 2 {
-			return false
-		}
-		first := map[string]bool{"Andi": true, "Rina": true, "Dewi": true, "Bima": true, "Maya": true, "Raka": true, "Nadia": true, "Fajar": true}
-		last := map[string]bool{"Pratama": true, "Wijaya": true, "Lestari": true, "Saputra": true, "Utami": true, "Santoso": true, "Permata": true, "Nugraha": true}
-		return first[parts[0]] && last[parts[1]]
-	default:
-		return strings.HasPrefix(value, "masked_")
-	}
-}
-
-func countDigits(value string) int {
-	count := 0
-	for _, r := range value {
-		if r >= '0' && r <= '9' {
-			count++
-		}
-	}
-	return count
 }
