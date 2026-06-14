@@ -1,0 +1,17 @@
+# Force LF line endings for Go source files.
+# Without this, Windows checkouts with core.autocrlf=true can
+# reintroduce CRLF after gofmt, which fails CI's gofmt -s -l gate
+# on ubuntu-latest runners (which use LF).
+*.go text eol=lf
+
+# Shell scripts should also be LF.
+*.sh text eol=lf
+
+# Markdown can tolerate both, but LF is the project norm.
+*.md text eol=lf
+
+# YAML, JSON, TOML — LF only.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
